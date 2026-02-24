@@ -20,9 +20,115 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QStatusBar,
+    QRubberBand,
 )
-from PySide6.QtCore import Qt, QTimer, QItemSelectionModel
+from PySide6.QtCore import Qt, QTimer, QItemSelectionModel, QRect, QPoint, QSize
 from PySide6.QtGui import QColor, QBrush, QCursor
+
+
+class RubberBandTableWidget(QTableWidget):
+    """支持橡皮筋框选的表格控件。
+
+    在非复选框区域按住左键拖拽可框选行，释放后自动勾选被覆盖的行。
+    按住 Ctrl 拖拽为追加模式，不会取消已有勾选。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rubber_band = None
+        self._origin = None
+        self._dragging = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.position().toPoint()
+            index = self.indexAt(pos)
+            if index.isValid() and index.column() == 0:
+                self._origin = None
+            else:
+                self._origin = pos
+                self._dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & Qt.LeftButton) and self._origin is not None:
+            pos = event.position().toPoint()
+            if not self._dragging:
+                delta = pos - self._origin
+                if delta.manhattanLength() > 5:
+                    self._dragging = True
+                    if self._rubber_band is None:
+                        self._rubber_band = QRubberBand(
+                            QRubberBand.Rectangle, self.viewport()
+                        )
+                    self._rubber_band.setGeometry(QRect(self._origin, QSize(0, 0)))
+                    self._rubber_band.show()
+
+            if self._dragging and self._rubber_band:
+                rect = QRect(self._origin, pos).normalized()
+                self._rubber_band.setGeometry(rect)
+                self._preview_selection(rect, event.modifiers())
+                return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            if self._rubber_band:
+                rect = self._rubber_band.geometry()
+                self._rubber_band.hide()
+                self._apply_rubber_band_selection(rect, event.modifiers())
+            self._origin = None
+            return
+
+        self._origin = None
+        super().mouseReleaseEvent(event)
+
+    def _row_visual_rect(self, row):
+        first = self.visualRect(self.model().index(row, 0))
+        last = self.visualRect(self.model().index(row, self.columnCount() - 1))
+        return first.united(last)
+
+    def _preview_selection(self, rect, modifiers):
+        """拖拽过程中实时高亮被框选覆盖的行。"""
+        ctrl_held = bool(modifiers & Qt.ControlModifier)
+        sel_model = self.selectionModel()
+        if not sel_model:
+            return
+        sel_model.clearSelection()
+        for row in range(self.rowCount()):
+            row_rect = self._row_visual_rect(row)
+            if row_rect.intersects(rect):
+                self.selectRow(row)
+            elif ctrl_held:
+                check_item = self.item(row, 0)
+                if check_item and check_item.checkState() == Qt.Checked:
+                    self.selectRow(row)
+
+    def _apply_rubber_band_selection(self, rect, modifiers):
+        """框选结束后，根据覆盖范围更新复选框状态并同步行高亮。"""
+        ctrl_held = bool(modifiers & Qt.ControlModifier)
+
+        self.blockSignals(True)
+        for row in range(self.rowCount()):
+            row_rect = self._row_visual_rect(row)
+            check_item = self.item(row, 0)
+            if check_item is None:
+                continue
+            if row_rect.intersects(rect):
+                check_item.setCheckState(Qt.Checked)
+            elif not ctrl_held:
+                check_item.setCheckState(Qt.Unchecked)
+        self.blockSignals(False)
+
+        sel_model = self.selectionModel()
+        if sel_model:
+            sel_model.clearSelection()
+            for row in range(self.rowCount()):
+                check_item = self.item(row, 0)
+                if check_item and check_item.checkState() == Qt.Checked:
+                    self.selectRow(row)
 
 
 class VideoAssetAssistant(QWidget):
@@ -154,7 +260,7 @@ class VideoAssetAssistant(QWidget):
         main_layout.addWidget(filter_group, stretch=1)
 
         # 中间：表格
-        self.table = QTableWidget()
+        self.table = RubberBandTableWidget()
         # 增加一列复选框列用于选择
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["选择", "路径", "标签", "描述"])
