@@ -9,13 +9,13 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QLayout,
     QTableWidget,
     QTableWidgetItem,
     QLineEdit,
     QPushButton,
     QLabel,
     QCheckBox,
-    QScrollArea,
     QGroupBox,
     QMessageBox,
     QFileDialog,
@@ -24,6 +24,84 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QItemSelectionModel, QRect, QPoint, QSize
 from PySide6.QtGui import QColor, QBrush, QCursor
+
+
+class FlowLayout(QLayout):
+    """自动换行的流式布局，标签横向排列并在空间不足时换行。"""
+
+    def __init__(self, parent=None, margin=4, hspacing=8, vspacing=4):
+        super().__init__(parent)
+        self._hspacing = hspacing
+        self._vspacing = vspacing
+        self._items = []
+        if margin >= 0:
+            self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+
+        for item in self._items:
+            wid = item.widget()
+            if wid is not None and not wid.isVisible():
+                continue
+            item_w = item.sizeHint().width()
+            item_h = item.sizeHint().height()
+            next_x = x + item_w + self._hspacing
+            if next_x - self._hspacing > effective.right() and line_height > 0:
+                x = effective.x()
+                y += line_height + self._vspacing
+                next_x = x + item_w + self._hspacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+            x = next_x
+            line_height = max(line_height, item_h)
+
+        return y + line_height - rect.y() + m.bottom()
 
 
 class RubberBandTableWidget(QTableWidget):
@@ -245,19 +323,20 @@ class VideoAssetAssistant(QWidget):
 
         main_layout = QVBoxLayout(self)
 
-        # 顶部：标签筛选区（滚动区域内复选框）
+        # 顶部：标签筛选区（搜索框 + 流式布局复选框）
         filter_group = QGroupBox("标签筛选（多选为交集）")
         filter_layout = QVBoxLayout(filter_group)
 
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.filter_container = QWidget()
-        self.filter_container_layout = QVBoxLayout(self.filter_container)
-        self.filter_container_layout.addStretch(1)
-        self.scroll_area.setWidget(self.filter_container)
+        self.tag_search_edit = QLineEdit()
+        self.tag_search_edit.setPlaceholderText("搜索标签…")
+        self.tag_search_edit.setClearButtonEnabled(True)
+        self.tag_search_edit.textChanged.connect(self.on_tag_search_changed)
+        filter_layout.addWidget(self.tag_search_edit)
 
-        filter_layout.addWidget(self.scroll_area)
-        main_layout.addWidget(filter_group, stretch=1)
+        self.filter_container = QWidget()
+        self.filter_container_layout = FlowLayout(self.filter_container)
+        filter_layout.addWidget(self.filter_container)
+        main_layout.addWidget(filter_group, stretch=0)
 
         # 中间：表格
         self.table = RubberBandTableWidget()
@@ -330,17 +409,16 @@ class VideoAssetAssistant(QWidget):
     # ---------------------- 标签筛选区 ----------------------
     def refresh_tag_filters(self):
         """根据当前所有记录中的标签刷新复选框列表。"""
-        # 记录当前已勾选标签，刷新后尽量保留
         previously_checked = {
             tag for tag, cb in self.tag_checkboxes.items() if cb.isChecked()
         }
 
         # 清空旧控件
-        for i in reversed(range(self.filter_container_layout.count() - 1)):
-            item = self.filter_container_layout.itemAt(i)
+        while self.filter_container_layout.count():
+            item = self.filter_container_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                widget.setParent(None)
+                widget.deleteLater()
 
         self.tag_checkboxes.clear()
 
@@ -357,14 +435,24 @@ class VideoAssetAssistant(QWidget):
             if tag in previously_checked:
                 cb.setChecked(True)
             cb.stateChanged.connect(self.on_tag_filter_changed)
-            self.filter_container_layout.insertWidget(
-                self.filter_container_layout.count() - 1, cb
-            )
+            self.filter_container_layout.addWidget(cb)
             self.tag_checkboxes[tag] = cb
+
+        # 应用当前搜索过滤
+        search_text = self.tag_search_edit.text().strip().lower()
+        if search_text:
+            for tag, cb in self.tag_checkboxes.items():
+                cb.setVisible(search_text in tag.lower())
 
     def on_tag_filter_changed(self, state):
         _ = state
         self.refresh_table()
+
+    def on_tag_search_changed(self, text):
+        """根据搜索关键词显示/隐藏标签复选框。"""
+        keyword = text.strip().lower()
+        for tag, cb in self.tag_checkboxes.items():
+            cb.setVisible(not keyword or keyword in tag.lower())
 
     def get_selected_tags(self):
         return [tag for tag, cb in self.tag_checkboxes.items() if cb.isChecked()]
@@ -628,9 +716,8 @@ class VideoAssetAssistant(QWidget):
                     QItemSelectionModel.Deselect | QItemSelectionModel.Rows,
                 )
 
-    # ---------------------- 关闭事件 ----------------------
+    # ---------------------- 窗口事件 ----------------------
     def closeEvent(self, event):
-        # 可以在此扩展需要的清理操作
         event.accept()
 
     # ---------------------- 删除选中素材 ----------------------
