@@ -11,13 +11,7 @@ echo ========================================
 echo  正在打包 %APP_NAME% ...
 echo ========================================
 
-pyinstaller --noconfirm --onefile --windowed ^
-    --name "%APP_NAME%" ^
-    --distpath "%DIST_DIR%" ^
-    --workpath "%SRC_DIR%build" ^
-    --specpath "%SRC_DIR%" ^
-    "%ENTRY%"
-
+pyinstaller --noconsole --onefile --name "视频素材助手" --clean index.py
 if %errorlevel% neq 0 (
     echo.
     echo [错误] PyInstaller 打包失败，请检查环境是否已安装 pyinstaller。
